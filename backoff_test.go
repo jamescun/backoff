@@ -1,95 +1,126 @@
 package backoff
 
 import (
+	"errors"
+	"log"
+	"math/rand"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/pusher/buddha/tcptest"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestBackoffDuration(t *testing.T) {
+func init() {
+	// make randomness source deterministic for testing
+	backoffRand = rand.New(rand.NewSource(1))
+}
+
+func TestNew(t *testing.T) {
 	b := New(100*time.Millisecond, 5)
 
-	if d := b.Duration().String(); d != "100ms" {
-		t.Fatal("expected 100ms, got", d)
-	} else if d := b.Duration().String(); d != "200ms" {
-		t.Fatal("expected 200ms, got", d)
-	} else if d := b.Duration().String(); d != "400ms" {
-		t.Fatal("expected 400ms, got", d)
-	} else if d := b.Duration().String(); d != "800ms" {
-		t.Fatal("expected 800ms, got", d)
-	}
+	assert.Equal(t, b.Minimum, 100*time.Millisecond)
+	assert.Equal(t, b.Maximum, 5)
+}
 
-	if b.failures != 4 {
-		t.Fatal("expected 4 failures, got", b.failures)
+func TestBackoffDuration(t *testing.T) {
+	b := Backoff{Minimum: 100 * time.Millisecond, Maximum: 5, Jitter: false}
+
+	assert.Equal(t, b.duration(0), 100*time.Millisecond)
+	assert.Equal(t, b.duration(1), 200*time.Millisecond)
+	assert.Equal(t, b.duration(2), 400*time.Millisecond)
+	assert.Equal(t, b.duration(3), 800*time.Millisecond)
+	assert.Equal(t, b.duration(4), 1600*time.Millisecond)
+}
+
+func BenchmarkBackoffDuration(b *testing.B) {
+	bk := Backoff{Minimum: 100 * time.Millisecond, Maximum: 5, Jitter: false}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bk.duration(1)
 	}
 }
 
 func TestBackoffDurationJitter(t *testing.T) {
-	b := New(100*time.Millisecond, 5)
-	b.Jitter = true
+	b := Backoff{Minimum: 100 * time.Millisecond, Maximum: 5, Jitter: true}
 
-	between(t, 100*time.Millisecond, 200*time.Millisecond, b.Duration())
-	between(t, 100*time.Millisecond, 400*time.Millisecond, b.Duration())
+	// randomness has been made deterministic in init()
+	assert.Equal(t, b.duration(0), time.Duration(97779410))
+	assert.Equal(t, b.duration(1), time.Duration(182153551))
+	assert.Equal(t, b.duration(2), time.Duration(266145821))
+	assert.Equal(t, b.duration(3), time.Duration(635010051))
+	assert.Equal(t, b.duration(4), time.Duration(1087113937))
 }
 
-func TestBackoffDurationInternal(t *testing.T) {
-	b := New(500*time.Millisecond, 5)
+func BenchmarkBackoffDurationJitter(b *testing.B) {
+	bk := Backoff{Minimum: 100 * time.Millisecond, Maximum: 5, Jitter: true}
 
-	if d := b.duration(float64(500*time.Millisecond), 0).String(); d != "500ms" {
-		t.Fatal("expected 500ms, got", d)
-	} else if d := b.duration(float64(500*time.Millisecond), 1).String(); d != "1s" {
-		t.Fatal("expected 1s, got", d)
-	} else if d := b.duration(float64(500*time.Millisecond), 2).String(); d != "2s" {
-		t.Fatal("expected 2s, got", d)
-	} else if d := b.duration(float64(500*time.Millisecond), 3).String(); d != "4s" {
-		t.Fatal("expected 4s, got", d)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bk.duration(1)
 	}
+}
+
+func ExampleBackoffDo(t *testing.T) {
+	var conn net.Conn
+	var err error
+
+	// configure backoff, starting at 100ms up to 5 times (1.6s)
+	b := New(100*time.Millisecond, 5)
+
+	err = b.Do(func() error {
+		conn, err = net.Dial("tcp", "exmaple.org:80")
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		log.Fatalln("fatal! could not connect!", err)
+	}
+	defer conn.Close()
+
+	// ... do something with conn ...
+}
+
+func TestBackoffDo(t *testing.T) {
+	b := Backoff{Minimum: 10 * time.Millisecond, Maximum: 5}
+
+	n := 0
+	err := b.Do(func() error {
+		n++
+		return nil
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, n, 1)
+}
+
+func TestBackoffDoError(t *testing.T) {
+	b := Backoff{Minimum: 10 * time.Millisecond, Maximum: 5}
+
+	n := 0
+	testError := errors.New("[ test error ]")
+	err := b.Do(func() error {
+		n++
+		return testError
+	})
+	assert.Equal(t, err, testError)
+	assert.Equal(t, n, 5)
 }
 
 func TestBackoffDial(t *testing.T) {
 	ts := tcptest.NewServer(func(conn net.Conn) {
-		defer conn.Close()
+		conn.Close()
 	})
 	defer ts.Close()
 
-	b := New(100*time.Millisecond, 5)
+	b := Backoff{Minimum: 100 * time.Millisecond, Maximum: 5}
 
 	conn, err := b.Dial("tcp", ts.Addr.String())
-	if err != nil {
-		t.Fatal("unexpected error:", err)
-	}
-	defer conn.Close()
-}
-
-func TestBackoffReset(t *testing.T) {
-	b := New(100*time.Millisecond, 5)
-	b.Duration()
-	b.Duration()
-	b.Duration()
-
-	b.Reset()
-	if b.failures != 0 {
-		t.Fatal("expected 0 failures, got", b.failures)
-	}
-}
-
-func BenchmarkBackoffDuration(b *testing.B) {
-	bk := New(100*time.Millisecond, 5)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		bk.Duration()
-	}
-}
-
-func between(t *testing.T, min, max, v time.Duration) {
-	if v < min {
-		t.Fatalf("expected > %s, got %s", min, v)
-	}
-
-	if v > max {
-		t.Fatalf("expected < %s, got %s", max, v)
+	if assert.NoError(t, err) {
+		conn.Close()
 	}
 }

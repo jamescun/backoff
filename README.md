@@ -1,7 +1,7 @@
 Backoff
 =======
 
-Simple implementation of an exponential backoff routine, primarily for use in network settings.
+Simple implementation of an exponential backoff mechanism, including helpers for establishing network connections.
 
 	go get github.com/jamescun/backoff
 
@@ -14,14 +14,12 @@ Example
 ```go
 b := backoff.New(100 * time.Millisecond, 5)
 
-conn, err := b.Dial("tcp", "flapping-network-service.local:8080")
-if err != nil {
-	// err is the last connection error
-}
-defer conn.Close()
+err := b.Do(func() error {
+	conn, err = net.Dial("tcp", "flapping-network-server.local:80")
+	if err != nil {
+		return err
+	}
+
+	return nil
+})
 ```
-
-License
--------
-
-MIT

@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// random source for jitter (if enabled), no need to be cryptographically random
+var backoffRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
 type Backoff struct {
 	// minimum backoff time
 	Minimum time.Duration
@@ -17,55 +20,54 @@ type Backoff struct {
 	// add randomness to backoff duration
 	// http://www.awsarchitectureblog.com/2015/03/backoff.html
 	Jitter bool
-
-	failures float64
 }
 
-// allocate new exponential backoff
-func New(min time.Duration, max int) *Backoff {
-	return &Backoff{
+// create a new exponential Backoff assignment with minimum time between
+// failures and maximum total failures.
+func New(min time.Duration, max int) Backoff {
+	return Backoff{
 		Minimum: min,
 		Maximum: max,
 	}
 }
 
-// calculate next duration of exponential backoff
-func (b *Backoff) Duration() time.Duration {
-	d := b.duration(float64(b.Minimum), b.failures)
-
-	b.failures++
-	return d
-}
-
-func (b *Backoff) duration(min, failures float64) time.Duration {
-	d := min * math.Pow(2, failures)
+func (b Backoff) duration(failures int) time.Duration {
+	d := int64(b.Minimum) * int64(math.Pow(2, float64(failures)))
 
 	if b.Jitter {
-		d = rand.Float64()*(d-min) + min
+		d = (d / 2) + backoffRand.Int63n((d / 2))
 	}
 
 	return time.Duration(d)
 }
 
-// implements dialer interface
-// connects to server with exponential backoff
-// unlike Duration(), Dial() can be used concurrently between many operations
-func (b *Backoff) Dial(network, address string) (conn net.Conn, err error) {
-	var failures float64
+// execute function fn with exponential backoff mechanism.
+// will return last error returned by fn, or nil on first successful attempt.
+func (b Backoff) Do(fn func() error) (err error) {
+	var failures int
+
 	for {
-		conn, err = net.Dial(network, address)
+		err = fn()
 		if err == nil {
-			return conn, nil
+			break
 		}
 
 		failures++
-		time.Sleep(b.duration(float64(b.Minimum), failures))
+		if failures >= b.Maximum {
+			break
+		}
+		time.Sleep(b.duration(failures))
 	}
 
-	return nil, err
+	return
 }
 
-// reset failure count
-func (b *Backoff) Reset() {
-	b.failures = 0
+// implements dialer interface with exponential backoff mechanism.
+func (b Backoff) Dial(network, address string) (conn net.Conn, err error) {
+	b.Do(func() error {
+		conn, err = net.Dial(network, address)
+		return err
+	})
+
+	return
 }
